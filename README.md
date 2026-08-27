@@ -260,3 +260,65 @@ config = ScannerConfig.create(
 )
 report = MarketScanner(IndicatorsEngine()).scan(ohlcv_data, config=config, evaluation_date="2024-06-28")
 ```
+
+## Opportunity Scorer
+
+The Opportunity Scorer takes a `ScanReport` already produced by the
+`MarketScanner` and orders its `candidate` symbols by a single declared
+metric. It does not fetch or compute market data, does not import `pandas`,
+`DataEngine`, or `IndicatorsEngine`, does not re-evaluate filters, and does
+not depend on `ScannerConfig` in any way — its only input is the `ScanReport`
+value itself.
+
+```text
+ScanReport (from MarketScanner)
+       ↓
+keep only status == "candidate"
+       ↓
+OpportunityScorer (ScorerConfig: metric, direction)
+       ↓
+ScoreReport (ranked results + excluded)
+```
+
+### Candidate selection
+
+Only results with `status == "candidate"` are considered. `rejected` and
+`insufficient_data` results are neither ranked nor reported as excluded —
+they are simply not part of this stage's concern, since the Scanner already
+recorded why they were set aside.
+
+### Metric and exclusion
+
+`ScorerConfig.metric` names a key expected in `SymbolScanResult.metrics`
+(never `soft_conditions`). A candidate is excluded — never ranked, never
+imputed a value such as zero — when the metric is absent from `metrics`
+(`reason_code="metric_missing"`), present but `None`
+(`reason_code="metric_none"`), or a float NaN (`reason_code="metric_nan"`).
+Whether the metric will actually be present cannot be verified when
+`ScorerConfig` is constructed, since it depends on a future `ScanReport`; it
+is checked only when `score()` runs.
+
+### Ranking and determinism
+
+`ScorerConfig.direction` is `"asc"` or `"desc"`. Ranks are ordinal
+(`1, 2, 3, ...`) with no gaps or repeats, ordered by the metric and broken by
+`symbol` ascending on exact ties. The result never depends on the order of
+`report.results` — the same `ScanReport` and `ScorerConfig` always produce
+the same `ScoreReport`. `ScorerConfig.config_id` is a deterministic SHA-256
+hash over `{version, metric, direction}`, independent of any
+`ScannerConfig.config_id`.
+
+### Traceability
+
+Every `ScoredCandidate` and `ExcludedCandidate` keeps its original
+`SymbolScanResult` as `source_result`, unmutated. `ScoreReport` also carries
+`source_scanner_config_id` and `source_scanner_version` (copied from the
+input `ScanReport`), so a `ScoreReport` is always traceable back to the exact
+scan that produced it.
+
+```python
+from trading_agent.scorer import OpportunityScorer, ScorerConfig
+
+scorer_config = ScorerConfig.create(metric="rsi_14", direction="desc")
+score_report = OpportunityScorer().score(report, config=scorer_config)
+```

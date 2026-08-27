@@ -322,3 +322,50 @@ from trading_agent.scorer import OpportunityScorer, ScorerConfig
 scorer_config = ScorerConfig.create(metric="rsi_14", direction="desc")
 score_report = OpportunityScorer().score(report, config=scorer_config)
 ```
+
+## Strategy
+
+The Strategy layer takes a `ScoreReport` already produced by the
+`OpportunityScorer` and decides, for each ranked candidate, whether it falls
+within a configured limit. It does not import `pandas`, `DataEngine`,
+`IndicatorsEngine`, `MarketScanner`, or `ScannerConfig`, does not depend on
+`ScorerConfig`, and does not compute direction, position size, stop-loss,
+take-profit, or place any order — this is deliberately the smallest possible
+first version, limited to turning scored opportunities into decisions.
+
+```text
+ScoreReport (from OpportunityScorer)
+       ↓
+consider only report.results (ranked candidates; report.excluded is ignored)
+       ↓
+StrategyEngine (StrategyConfig: max_candidates)
+       ↓
+StrategyReport (one StrategyDecision per ranked candidate)
+```
+
+### Decision rule
+
+Only `report.results` is considered — `report.excluded` entries were never
+ranked, so they never produce a decision. A candidate with
+`rank <= StrategyConfig.max_candidates` is `"enter"`
+(`reason_code="selected_top_ranked"`); otherwise it is `"no_action"`
+(`reason_code="rank_exceeds_max_candidates"`). There is no third action, no
+direction, and no sizing — those remain later milestones.
+
+### Determinism and traceability
+
+`StrategyConfig.config_id` is a deterministic SHA-256 hash over
+`{version, max_candidates}`, independent of any `ScorerConfig.config_id` or
+`ScannerConfig.config_id`. `StrategyEngine.decide()` never depends on the
+order of `report.results`: decisions are always returned ordered by rank
+ascending. Every `StrategyDecision` keeps its original `ScoredCandidate` as
+`source_candidate`, unmutated, so a decision is always traceable back to the
+scored candidate — and, through it, to the original scan result — that
+produced it.
+
+```python
+from trading_agent.strategies import StrategyConfig, StrategyEngine
+
+strategy_config = StrategyConfig.create(max_candidates=5)
+strategy_report = StrategyEngine().decide(score_report, config=strategy_config)
+```

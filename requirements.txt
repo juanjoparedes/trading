@@ -1,2 +1,4 @@
-# Test infrastructure for the project foundation.
+# Market-data infrastructure and tests.
+pandas>=2.0,<3.0
+yfinance>=0.2,<1.0
 pytest>=8.0,<9.0

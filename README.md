@@ -124,3 +124,32 @@ The initial provider depends on yfinance and its upstream data availability,
 which may be delayed, unavailable, or subject to provider changes. It is an
 implementation choice for research, not a trading or execution connection.
 The default test suite uses synthetic data and does not require Internet access.
+
+## Indicators Engine
+
+The Indicators Engine accepts only normalized daily OHLCV data and returns
+mathematical indicator values. It neither fetches data nor produces signals,
+orders, or risk decisions. Calculations are independently grouped by `symbol`,
+sorted by `date`, and only use current or prior observations.
+
+Available indicators are `sma`, `ema`, `rsi`, `momentum`, `atr`, and `returns`.
+Their defaults are SMA/EMA 20, RSI/ATR 14, and momentum 10 periods. Windowed
+SMA and EMA use `min_periods=window`; momentum uses an N-period lag; and the
+first return is `NaN`. EMA uses pandas' recursive `adjust=False` convention,
+with its first visible value withheld until a full window. RSI and ATR use
+Wilder smoothing: an initial arithmetic average over the first full period,
+then `(previous × (period - 1) + current) / period`. RSI is 100 for a positive
+average gain with zero average loss, and 50 when both are zero.
+
+Warm-up `NaN` values are expected and are not filled. Input-data `NaN` values
+remain invalid. Use configurable `IndicatorConfig` values for non-default
+windows:
+
+```python
+from trading_agent.indicators import IndicatorConfig, IndicatorsEngine
+
+result = IndicatorsEngine().calculate(
+    ohlcv_data,
+    indicators=["returns", IndicatorConfig("sma", window=20), IndicatorConfig("rsi", window=14)],
+)
+```

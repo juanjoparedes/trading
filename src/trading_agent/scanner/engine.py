@@ -305,12 +305,24 @@ def _evaluate_soft_conditions(
 
 
 def _collect_metrics(config: ScannerConfig, row: pd.Series) -> dict[str, float | None]:
+    """Collect declared metrics plus ``close``, which is always available.
+
+    ``close`` is the as-of-date reference price for the symbol. It is
+    included unconditionally — independent of whether it was declared in
+    ``hard_filters``, ``soft_conditions``, or ``indicator_requirements`` —
+    so a downstream consumer (e.g. a future Strategy) always has a reference
+    price without needing direct OHLCV access. It comes from the same
+    already-trimmed, already-validated ``row`` every other metric comes
+    from, so it carries the same anti-look-ahead and per-symbol isolation
+    guarantees as any other field collected here.
+    """
     fields = set(config.required_indicator_columns())
     fields.update(hard_filter.field for hard_filter in config.hard_filters)
     fields.update(
         hard_filter.compare_field for hard_filter in config.hard_filters if hard_filter.compare_field is not None
     )
     fields.update(condition.field for condition in config.soft_conditions)
+    fields.add("close")
     metrics: dict[str, float | None] = {}
     for field_name in sorted(fields):
         value = row.get(field_name)

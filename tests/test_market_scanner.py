@@ -689,3 +689,130 @@ def test_hard_filter_requires_exactly_one_of_threshold_or_compare_field() -> Non
         HardFilter(filter_id="bad", field="close", operator=">=", threshold=1.0, compare_field="sma_3")
     with pytest.raises(ScannerConfigError):
         HardFilter(filter_id="bad", field="close", operator=">=")
+
+
+# ---------------------------------------------------------------------------
+# metrics["close"] is unconditionally available (MEDIUM finding remediation)
+# ---------------------------------------------------------------------------
+
+
+def test_metrics_close_is_present_even_when_never_declared_in_config() -> None:
+    data = make_ohlcv("AAPL", [100.0, 101.0, 102.0, 103.0, 104.0])
+    config = ScannerConfig.create(universe=["AAPL"])  # no hard_filters, soft_conditions, or indicators
+
+    report = new_scanner().scan(data, config=config, evaluation_date=data["date"].max())
+
+    (result,) = report.results
+    assert result.status == "candidate"
+    assert result.metrics["close"] == 104.0
+
+
+def test_metrics_close_matches_the_as_of_date_row_exactly() -> None:
+    data = make_ohlcv("AAPL", [100.0, 101.0, 999.0])
+    config = ScannerConfig.create(universe=["AAPL"])
+    evaluation_date = data["date"].iloc[1]  # stop before the 999.0 session
+
+    report = new_scanner().scan(data, config=config, evaluation_date=evaluation_date)
+
+    (result,) = report.results
+    assert result.as_of_date == data["date"].iloc[1].date()
+    assert result.metrics["close"] == 101.0
+
+
+def test_metrics_close_never_reflects_a_future_session() -> None:
+    stable_closes = [100.0, 101.0, 99.0, 102.0, 103.0, 104.0]
+    future_shock = [10.0, 500.0, 5.0, 999.0]
+    dataset_a = make_ohlcv("AAPL", stable_closes)
+    dataset_b = combine(dataset_a, make_ohlcv("AAPL", future_shock, start="2024-01-15"))
+    evaluation_date = dataset_a["date"].max()
+    config = ScannerConfig.create(universe=["AAPL"])
+    scanner = new_scanner()
+
+    report_a = scanner.scan(dataset_a, config=config, evaluation_date=evaluation_date)
+    report_b = scanner.scan(dataset_b, config=config, evaluation_date=evaluation_date)
+
+    assert report_a.results == report_b.results
+    assert report_a.results[0].metrics["close"] == stable_closes[-1]
+    assert report_a.results[0].metrics["close"] not in future_shock
+
+
+def test_metrics_close_is_independent_between_symbols() -> None:
+    aapl = make_ohlcv("AAPL", [100.0, 101.0, 102.0])
+    spy = make_ohlcv("SPY", [400.0, 401.0, 402.0])
+    config = ScannerConfig.create(universe=["AAPL", "SPY"])
+    evaluation_date = aapl["date"].max()
+
+    solo_aapl_report = new_scanner().scan(aapl, config=config, evaluation_date=evaluation_date)
+    joint_report = new_scanner().scan(combine(aapl, spy), config=config, evaluation_date=evaluation_date)
+
+    by_symbol = {result.symbol: result for result in joint_report.results}
+    assert by_symbol["AAPL"].metrics["close"] == 102.0
+    assert by_symbol["SPY"].metrics["close"] == 402.0
+    assert by_symbol["AAPL"].metrics["close"] == solo_aapl_report.results[0].metrics["close"]
+
+
+def test_metrics_close_still_present_and_unchanged_when_explicitly_requested() -> None:
+    data = make_ohlcv("AAPL", [100.0, 101.0, 102.0, 103.0])
+    config = ScannerConfig.create(
+        universe=["AAPL"],
+        hard_filters=[HardFilter(filter_id="min_price", field="close", operator=">=", threshold=50.0)],
+        soft_conditions=[SoftCondition(field="close")],
+    )
+
+    report = new_scanner().scan(data, config=config, evaluation_date=data["date"].max())
+
+    (result,) = report.results
+    assert result.status == "candidate"
+    assert result.metrics["close"] == 103.0
+    assert result.soft_conditions[0].field == "close"
+    assert result.soft_conditions[0].value == 103.0
+    assert result.passed_filters[0].observed_value == 103.0
+
+
+def test_metrics_close_is_not_fabricated_for_missing_symbol_data() -> None:
+    data = make_ohlcv("AAPL", [100.0, 101.0], start="2024-02-01")
+    config = ScannerConfig.create(universe=["AAPL"])
+    evaluation_date = "2024-01-01"  # entirely before any observation
+
+    report = new_scanner().scan(data, config=config, evaluation_date=evaluation_date)
+
+    (result,) = report.results
+    assert result.status == "insufficient_data"
+    assert result.metrics == {}
+
+
+def test_metrics_close_is_not_fabricated_for_stale_data() -> None:
+    aapl = make_ohlcv("AAPL", [100.0, 101.0, 102.0], start="2024-01-01")
+    stale_evaluation_date = "2024-01-10"
+    config = ScannerConfig.create(universe=["AAPL"], max_staleness_days=0)
+
+    report = new_scanner().scan(aapl, config=config, evaluation_date=stale_evaluation_date)
+
+    (result,) = report.results
+    assert result.status == "insufficient_data"
+    assert result.metrics == {}
+
+
+def test_metrics_close_is_not_fabricated_when_warmup_is_insufficient() -> None:
+    data = make_ohlcv("AAPL", [100.0, 101.0])
+    config = ScannerConfig.create(universe=["AAPL"], indicator_requirements=[IndicatorConfig("sma", 5)])
+
+    report = new_scanner().scan(data, config=config, evaluation_date=data["date"].max())
+
+    (result,) = report.results
+    assert result.status == "insufficient_data"
+    assert result.metrics == {}
+
+
+def test_metrics_close_is_present_for_rejected_symbols_too() -> None:
+    data = make_ohlcv("AAPL", [100.0, 99.0, 98.0, 97.0])
+    config = ScannerConfig.create(
+        universe=["AAPL"],
+        hard_filters=[HardFilter(filter_id="min_price", field="close", operator=">=", threshold=1000.0)],
+    )
+
+    report = new_scanner().scan(data, config=config, evaluation_date=data["date"].max())
+
+    (result,) = report.results
+    assert result.status == "rejected"
+    assert result.metrics["close"] == 97.0

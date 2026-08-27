@@ -153,3 +153,110 @@ result = IndicatorsEngine().calculate(
     indicators=["returns", IndicatorConfig("sma", window=20), IndicatorConfig("rsi", window=14)],
 )
 ```
+
+## Market Scanner
+
+The Market Scanner identifies, for an explicit universe of symbols and a
+single `evaluation_date`, which symbols pass a configured set of objective
+filters. It does not fetch data, does not import a provider, does not rank
+or score candidates, and does not generate buy/sell signals — those remain
+later milestones.
+
+```text
+Normalized OHLCV
+       ↓
+filter: date <= evaluation_date
+       ↓
+IndicatorsEngine (only the declared indicators)
+       ↓
+MarketScanner (hard filters, soft conditions)
+       ↓
+ScanReport
+```
+
+### Symbol normalization
+
+`ScannerConfig.universe` is always normalized to uppercase, matching what
+`normalize_ohlcv` already guarantees for `data["symbol"]`. `scan()` relies on
+both sides using that same convention to match a symbol against the
+universe, so it validates it explicitly: a non-uppercase `symbol` in `data`
+is rejected with `DataValidationError` naming the offending value(s), rather
+than silently reported as `missing_symbol_data`. Data produced by
+`DataEngine` already satisfies this; the check only matters for a
+hand-built or future data source that skips normalization.
+
+### Anti-look-ahead
+
+The scanner trims the input to `date <= evaluation_date` *before* handing it
+to the `IndicatorsEngine`, for every symbol. No indicator value used in a
+decision can ever be influenced by a row dated after `evaluation_date`. This
+holds for every supported indicator, not only moving averages.
+
+### `evaluation_date` and `as_of_date`
+
+For each symbol, `as_of_date` is the latest available session with
+`date <= evaluation_date`. If `evaluation_date` itself is not a session in
+the data (a weekend, a holiday, or simply absent for that symbol), the
+previous available session is used. A later session is never used. Both
+`requested_evaluation_date` and `as_of_date` are preserved on every result.
+
+### Staleness
+
+`ScannerConfig.max_staleness_days` bounds how old `as_of_date` may be
+relative to `evaluation_date`. Exceeding it does not reject the symbol; it
+marks the result `insufficient_data` with `reason_code="stale_data"`.
+
+### Warm-up
+
+If any declared indicator is still `NaN` at `as_of_date` (insufficient
+history for its window), the result is `insufficient_data` with
+`reason_code="insufficient_indicator_history"`. Warm-up values are never
+filled, interpolated, or substituted.
+
+### Filters
+
+`HardFilter` supports `>=`, `<=`, `>`, `<` against either a numeric
+`threshold` (e.g. `close >= 10`) or another field via `compare_field` (e.g.
+`close > sma_20`, `ema_20 > sma_20`). A filter's `field` and `compare_field`
+must be a base OHLCV column or an indicator explicitly declared in
+`indicator_requirements` — this is validated when the `ScannerConfig` is
+constructed, not at scan time. There is no general expression language.
+
+`SoftCondition` records a metric's value for context (e.g. `rsi_14`). Soft
+conditions never reject a symbol.
+
+### Result states
+
+Each `SymbolScanResult.status` is exactly one of `candidate`, `rejected`, or
+`insufficient_data`. Each `FilterEvaluation.status` is `passed`, `failed`, or
+`unavailable`. Reason codes are structured, not narrative text: at minimum
+`filter_passed`, `filter_failed`, `missing_indicator`,
+`insufficient_indicator_history`, `stale_data`, and `missing_symbol_data`.
+
+### Determinism
+
+The same OHLCV data, universe, `ScannerConfig`, and `evaluation_date` always
+produce the same `ScanReport`; results are ordered by `symbol`.
+`ScannerConfig.config_id` is a deterministic SHA-256 hash of the
+configuration's semantic content: changing any material field (`version`,
+`universe`, `indicator_requirements`, a filter's or soft condition's own
+values, `max_staleness_days`, `warmup_policy`) changes it. `config_id` is
+deterministic and invariant to the declaration order of `hard_filters` and
+`soft_conditions`, as long as the semantic content is the same — each is
+canonicalized into a stable order (by `filter_id`, and by `field`,
+respectively) purely for identity purposes before hashing. This does not
+affect filter evaluation order or the order presented in a `ScanReport`.
+
+```python
+from trading_agent.indicators import IndicatorConfig
+from trading_agent.indicators.engine import IndicatorsEngine
+from trading_agent.scanner import HardFilter, MarketScanner, ScannerConfig
+
+config = ScannerConfig.create(
+    universe=["AAPL", "SPY", "QQQ"],
+    indicator_requirements=[IndicatorConfig("sma", 20)],
+    hard_filters=[HardFilter(filter_id="uptrend", field="close", operator=">", compare_field="sma_20")],
+    max_staleness_days=2,
+)
+report = MarketScanner(IndicatorsEngine()).scan(ohlcv_data, config=config, evaluation_date="2024-06-28")
+```
